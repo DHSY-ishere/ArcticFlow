@@ -1,0 +1,78 @@
+# docker compose up --build            # radix KV-aware routing (default)
+# ARCTIC_POLICY=roundrobin docker compose up --build   # baseline for A/B
+# docker compose --profile loadtest run --rm loadgen   # 1,000+ RPS-class multi-turn load
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.worker
+    args:
+      REAL: ${ARCTIC_REAL:-0}
+  environment: &worker-env
+    ARCTIC_BACKEND: ${ARCTIC_BACKEND:-sim}          # sim | hf
+    ARCTIC_SIM_HW: ${ARCTIC_SIM_HW:-h100}
+    ARCTIC_KV_BLOCKS: ${ARCTIC_KV_BLOCKS:-4096}     # must equal router ARCTIC_CAPACITY_BLOCKS
+    ARCTIC_MAX_BATCH: ${ARCTIC_MAX_BATCH:-256}
+    ARCTIC_MODEL: ${ARCTIC_MODEL:-Qwen/Qwen2.5-Coder-1.5B-Instruct}
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+
+services:
+  worker1:
+    <<: *worker
+    environment: {<<: *worker-env, ARCTIC_WORKER_NAME: w1, ARCTIC_PUBLIC_HOST: localhost}
+    ports: ["8815:8815"]
+  worker2:
+    <<: *worker
+    environment: {<<: *worker-env, ARCTIC_WORKER_NAME: w2, ARCTIC_PUBLIC_HOST: localhost}
+    ports: ["8816:8815"]
+  worker3:
+    <<: *worker
+    environment: {<<: *worker-env, ARCTIC_WORKER_NAME: w3, ARCTIC_PUBLIC_HOST: localhost}
+    ports: ["8817:8815"]
+
+  router:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.router
+    environment:
+      ARCTIC_WORKERS: w1=http://worker1:8000,w2=http://worker2:8000,w3=http://worker3:8000
+      ARCTIC_POLICY: ${ARCTIC_POLICY:-radix}
+      ARCTIC_ALPHA: ${ARCTIC_ALPHA:-1.0}
+      ARCTIC_BETA: ${ARCTIC_BETA:-0.01}
+      ARCTIC_CAPACITY_BLOCKS: ${ARCTIC_KV_BLOCKS:-4096}
+    ports: ["${ARCTIC_HTTP_PORT:-8080}:8080", "${ARCTIC_GRPC_PORT:-9090}:9090"]
+    depends_on:
+      worker1: {condition: service_healthy}
+      worker2: {condition: service_healthy}
+      worker3: {condition: service_healthy}
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes: ["./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9091:9090"]
+    depends_on: [router]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/arcticflow.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+  loadgen:
+    profiles: ["loadtest"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.loadgen
+    command: ["-mode", "http", "-target", "http://router:8080", "-sessions", "3000", "-turns", "3", "-ramp", "30", "-think", "3"]
+    depends_on: [router]

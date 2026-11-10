@@ -1,0 +1,128 @@
+name: sales_analytics
+description: Retail sales star schema - orders joined to customers and products.
+
+tables:
+  - name: orders
+    description: One row per order line. Grain is order line.
+    base_table: {database: ARCTIC, schema: PUBLIC, table: orders}
+    primary_key: {columns: [order_id]}
+    dimensions:
+      - name: order_status
+        expr: status
+        data_type: TEXT
+        description: Fulfilment state of the order.
+        synonyms: [status]
+        sample_values: [completed, pending, cancelled, refunded]
+      - name: sales_channel
+        expr: channel
+        data_type: TEXT
+        description: Channel the order was placed through.
+        synonyms: [channel]
+        sample_values: [web, mobile, retail, partner]
+    time_dimensions:
+      - name: order_date
+        expr: order_date
+        data_type: DATE
+        description: Date the order was placed.
+        synonyms: [date, time]
+    facts:
+      - name: amount
+        expr: amount
+        data_type: NUMBER
+        description: Net order line amount in USD.
+      - name: quantity
+        expr: quantity
+        data_type: NUMBER
+        description: Units sold on the line.
+      - name: customer_id
+        expr: customer_id
+        data_type: NUMBER
+      - name: product_id
+        expr: product_id
+        data_type: NUMBER
+    metrics:
+      - name: total_revenue
+        expr: SUM(amount)
+        description: Total net revenue.
+        synonyms: [revenue, sales, total sales]
+      - name: units_sold
+        expr: SUM(quantity)
+        description: Total units sold.
+        synonyms: [units, quantity sold]
+      - name: order_count
+        expr: COUNT(order_id)
+        description: Number of order lines.
+        synonyms: [orders, number of orders]
+
+  - name: customers
+    description: One row per customer.
+    base_table: {database: ARCTIC, schema: PUBLIC, table: customers}
+    primary_key: {columns: [customer_id]}
+    dimensions:
+      - name: customer_name
+        expr: customer_name
+        data_type: TEXT
+        synonyms: [customer, customers, buyer]
+      - name: region
+        expr: region
+        data_type: TEXT
+        synonyms: [regions, territory]
+        sample_values: [EMEA, APAC, AMER, LATAM]
+      - name: segment
+        expr: segment
+        data_type: TEXT
+        synonyms: [segments, customer segment]
+        sample_values: [Enterprise, SMB, Consumer]
+    metrics:
+      - name: customer_count
+        expr: COUNT(customer_id)
+        synonyms: [number of customers]
+
+  - name: products
+    description: One row per product.
+    base_table: {database: ARCTIC, schema: PUBLIC, table: products}
+    primary_key: {columns: [product_id]}
+    dimensions:
+      - name: product_name
+        expr: product_name
+        data_type: TEXT
+        synonyms: [product, products, item]
+      - name: category
+        expr: category
+        data_type: TEXT
+        synonyms: [categories, product category]
+        sample_values: [Hardware, Software, Services, Accessories]
+    facts:
+      - name: list_price
+        expr: list_price
+        data_type: NUMBER
+
+relationships:
+  - name: orders_to_customers
+    left_table: orders
+    right_table: customers
+    relationship_columns:
+      - {left_column: customer_id, right_column: customer_id}
+    join_type: left_outer
+    relationship_type: many_to_one
+  - name: orders_to_products
+    left_table: orders
+    right_table: products
+    relationship_columns:
+      - {left_column: product_id, right_column: product_id}
+    join_type: left_outer
+    relationship_type: many_to_one
+
+metrics:
+  - name: average_order_value
+    expr: AVG(orders.amount)
+    description: Mean net amount per order line.
+    synonyms: [aov, average order, average order value, avg order value]
+
+verified_queries:
+  - name: revenue_by_region
+    question: What is total revenue by region?
+    sql: SELECT customers.region, SUM(orders.amount) AS total_revenue FROM orders JOIN customers ON orders.customer_id = customers.customer_id GROUP BY customers.region ORDER BY total_revenue DESC
+  - name: monthly_revenue
+    question: Show monthly revenue
+    sql: SELECT DATE_TRUNC('month', orders.order_date) AS order_date_month, SUM(orders.amount) AS total_revenue FROM orders GROUP BY order_date_month ORDER BY order_date_month ASC

@@ -1,0 +1,11 @@
+# build context: repository root.  --build-arg REAL=1 adds torch + transformers for ARCTIC_BACKEND=hf
+FROM python:3.11-slim
+ARG REAL=0
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY engine/requirements.txt engine/requirements-real.txt ./
+RUN if [ "$REAL" = "1" ]; then pip install --no-cache-dir -r requirements-real.txt --extra-index-url https://download.pytorch.org/whl/cpu; \
+    else pip install --no-cache-dir -r requirements.txt; fi
+COPY engine/*.py ./
+EXPOSE 8000 8815
+CMD ["python", "worker.py"]
