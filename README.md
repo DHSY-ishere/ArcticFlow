@@ -53,6 +53,8 @@ ARCTIC_POLICY=roundrobin docker compose up --build    # baseline for A/B
 curl -N localhost:8080/v1/generate -H 'content-type: application/json' -d @request.json
 # request.json: {"semantic_model": "<yaml text>", "messages":[{"role":"user","content":"top 5 customers by revenue"}], "execute": true}
 
+curl localhost:8080/v1/route -H 'content-type: application/json' -d @request.json   # dry-run: which worker, and why (no side effects)
+
 go test ./...                                  # router + benchmark tests (use -race for the router)
 cd engine && pip install -r requirements-dev.txt && pytest
 go run ./benchmark/cmd/loadgen -sweep          # the 5,000-session simulation (≈1 min)
