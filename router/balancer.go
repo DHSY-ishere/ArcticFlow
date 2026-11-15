@@ -136,6 +136,56 @@ func (b *KVAwareBalancer) Route(tokens []uint32, reserveTokens int, exclude uint
 	return d, nil
 }
 
+// WorkerScore is one worker's line in a routing explanation.
+type WorkerScore struct {
+	Worker        string  `json:"worker"`
+	Healthy       bool    `json:"healthy"`
+	OverlapTokens int     `json:"overlap_tokens"`
+	OverlapRatio  float64 `json:"overlap_ratio"`
+	QueueDepth    int64   `json:"queue_depth"`
+	Score         float64 `json:"score"`
+	Chosen        bool    `json:"chosen"`
+}
+
+// Explainer is implemented by policies that can show their scoring without side effects.
+type Explainer interface {
+	Explain(tokens []uint32) []WorkerScore
+}
+
+// Explain is a dry run of Route: it scores every worker but reserves nothing and does not touch
+// the cache index. Ties resolve to the lowest worker ID (Route rotates its start, so the real
+// pick among exact ties may differ).
+func (b *KVAwareBalancer) Explain(tokens []uint32) []WorkerScore {
+	hashes := HashBlocks(tokens, b.Cache.BlockSize())
+	var mask uint64
+	for _, w := range b.Workers {
+		if w.Healthy() {
+			mask |= 1 << uint(w.ID)
+		}
+	}
+	matched := b.Cache.Match(hashes, mask)
+	out := make([]WorkerScore, 0, len(b.Workers))
+	best := -1
+	for _, w := range b.Workers {
+		s := WorkerScore{Worker: w.Name, Healthy: w.Healthy(), QueueDepth: w.QueueDepth()}
+		if s.Healthy {
+			s.OverlapTokens = matched[w.ID] * b.Cache.BlockSize()
+			if len(tokens) > 0 {
+				s.OverlapRatio = float64(s.OverlapTokens) / float64(len(tokens))
+			}
+			s.Score = b.Alpha*s.OverlapRatio - b.Beta*float64(s.QueueDepth)
+			if best < 0 || s.Score > out[best].Score {
+				best = len(out)
+			}
+		}
+		out = append(out, s)
+	}
+	if best >= 0 {
+		out[best].Chosen = true
+	}
+	return out
+}
+
 func (b *KVAwareBalancer) Release(d Decision) {
 	d.Worker.inflight.Add(-1)
 	d.Worker.inflightTokens.Add(-d.reservedToks)

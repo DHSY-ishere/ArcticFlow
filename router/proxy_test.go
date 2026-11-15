@@ -132,6 +132,56 @@ func TestProxyAffinityMetricsAndSSE(t *testing.T) {
 	}
 }
 
+func TestRouteExplainIsSideEffectFree(t *testing.T) {
+	var h0, h1 atomic.Int64
+	w0, w1 := fakeWorker(t, "w0", &h0), fakeWorker(t, "w1", &h1)
+	defer w0.Close()
+	defer w1.Close()
+	srv, _ := newTestServer(t, []string{w0.URL, w1.URL}, "radix")
+	front := httptest.NewServer(srv.Handler())
+	defer front.Close()
+
+	body, _ := json.Marshal(GenerateRequest{SemanticModel: bigModel(), Messages: []Message{{Role: "user", Content: "revenue by region"}}})
+	explain := func() (out struct {
+		Chosen  string        `json:"chosen"`
+		Workers []WorkerScore `json:"workers"`
+	}) {
+		resp, err := http.Post(front.URL+"/v1/route", "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// Cold cache: explaining must not warm it, so overlap stays zero on repeat calls.
+	for i := 0; i < 2; i++ {
+		for _, w := range explain().Workers {
+			if w.OverlapTokens != 0 {
+				t.Fatalf("explain mutated the cache: %+v", w)
+			}
+		}
+	}
+	// After a real request the serving worker should be explained as the winner with high overlap.
+	resp, _ := post(t, front.URL, string(body))
+	served := resp.Header.Get("X-Arctic-Worker")
+	out := explain()
+	if out.Chosen != served {
+		t.Fatalf("explain chose %q, real request went to %q", out.Chosen, served)
+	}
+	for _, w := range out.Workers {
+		if w.Worker == served && w.OverlapRatio < 0.9 {
+			t.Fatalf("expected high overlap on %s, got %+v", served, w)
+		}
+	}
+}
+
 func TestProxyFailover(t *testing.T) {
 	var h0, h1 atomic.Int64
 	dead := fakeWorker(t, "w0", &h0)

@@ -205,6 +205,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/generate", s.handleGenerate)
 	mux.HandleFunc("GET /v1/results/{worker}/{id}", s.handleResults)
 	mux.HandleFunc("GET /v1/workers", s.handleWorkers)
+	mux.HandleFunc("POST /v1/route", s.handleRoute)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	if s.Metrics != nil {
 		mux.Handle("GET /metrics", s.Metrics.Handler())
@@ -312,6 +313,41 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Error(w, "unknown worker", http.StatusNotFound)
+}
+
+// handleRoute is a side-effect-free "explain": it shows which worker a request would go to and
+// every worker's overlap/queue/score, without reserving capacity or touching the cache index.
+func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
+	ex, ok := s.Policy.(Explainer)
+	if !ok {
+		http.Error(w, "policy "+s.Policy.Name()+" does not support route explanations", http.StatusNotImplemented)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+	var req GenerateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.SemanticModel) == "" || len(req.Messages) == 0 {
+		http.Error(w, "semantic_model and messages are required", http.StatusBadRequest)
+		return
+	}
+	tokens := Tokenize(BuildPrompt(req.SemanticModel, req.Messages))
+	scores := ex.Explain(tokens)
+	out := struct {
+		Policy       string        `json:"policy"`
+		PromptTokens int           `json:"prompt_tokens"`
+		Chosen       string        `json:"chosen,omitempty"`
+		Workers      []WorkerScore `json:"workers"`
+	}{Policy: s.Policy.Name(), PromptTokens: len(tokens), Workers: scores}
+	for _, sc := range scores {
+		if sc.Chosen {
+			out.Chosen = sc.Worker
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
